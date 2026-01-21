@@ -2,6 +2,7 @@ import os
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
+from keep_alive import keep_alive
 
 # --- RAG・Gemini関連のライブラリ ---
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
@@ -102,6 +103,7 @@ async def on_message(message):
             await message.channel.send(f"エラーが発生しました: {e}")
             print(f"Error: {e}")
 
+keep_alive()
 # --- 4. Botの実行 ---
 if DISCORD_TOKEN:
     bot.run(DISCORD_TOKEN)
