@@ -1,6 +1,6 @@
 discord.py
-langchain
-langchain-community
+langchain==0.3.14
+langchain-community==0.3.14
 langchain-google-genai
 langchain-text-splitters
 faiss-cpu
