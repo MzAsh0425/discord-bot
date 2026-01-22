@@ -7,6 +7,8 @@ from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_text_splitters import CharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain.chains import RetrievalQA
+from langchain.prompts import PromptTemplate
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from keep_alive import keep_alive # サーバー常時稼働用
 
 # 環境変数の読み込み
@@ -27,7 +29,7 @@ bot = discord.Client(intents=intents)
 qa_chain = None
 
 def create_rag_chain():
-    """RAGのチェーンを作成する関数（Gemini 2.0対応版）"""
+    """RAGのチェーンを作成する関数（精度向上・Gemini 2.0対応版）"""
     global qa_chain
     
     if not os.path.exists(DATA_DIR):
@@ -37,7 +39,7 @@ def create_rag_chain():
 
     print("📂 ドキュメントを読み込んでいます...")
     try:
-        # テキストファイルを読み込む (show_progress=Trueで進捗表示)
+        # テキストファイルを読み込む
         loader = DirectoryLoader(DATA_DIR, glob="**/*.txt", loader_cls=TextLoader, show_progress=True)
         documents = loader.load()
         
@@ -47,39 +49,64 @@ def create_rag_chain():
 
         print(f"✅ {len(documents)} 件のファイルを読み込みました。")
 
-        # テキストを分割する
-        # Gemini 2.0のAPI制限を回避するため、チャンクサイズを大きめにしてリクエスト回数を減らす
-        text_splitter = CharacterTextSplitter(chunk_size=1500, chunk_overlap=200)
+        # 【改善1】テキスト分割を「Recursive（再帰的）」に変更
+        # 文章の意味の区切れ（改行や句読点）を優先して切るため、文脈が途切れにくい
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,  # 1塊のサイズ（少し小さくして具体性を高める）
+            chunk_overlap=200 # 前後の重複
+        )
         texts = text_splitter.split_documents(documents)
 
         print("🧠 ベクトルデータベースを構築中...")
-        # Embeddingsモデルの設定
         embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-        
-        # ベクトルDB作成
         db = FAISS.from_documents(texts, embeddings)
         
-        # Retrieverの設定
-        retriever = db.as_retriever()
+        # 【改善2】Retrieverの設定（検索件数を増やす）
+        # k=6: 関連する文章をトップ6件まで引っ張ってくる（デフォルトは4）
+        retriever = db.as_retriever(search_kwargs={"k": 6})
 
-        # LLM（Gemini 2.0 Flash）の設定
-        # max_retries=10: エラーが出ても10回まで自動で待ちながら再試行する（重要）
-        # transport="rest": 通信を安定させるための設定
+        # LLMの設定
         llm = ChatGoogleGenerativeAI(
             model="gemini-2.0-flash", 
-            temperature=0,
+            temperature=0, # 0にすることで、創造性を排除し事実に忠実にさせる
             max_retries=10,
             transport="rest" 
         )
 
+        # 【改善3】カスタムプロンプト（AIへの詳細な指示書）を作成
+        # ここで「具体的に答えろ」「ページ数は不要」と指示する
+        template = """
+        あなたは提供された資料に基づいて質問に答える専門のアシスタントです。
+        以下の「参照ドキュメント」の内容のみを使用して、質問に答えてください。
+        
+        【重要なルール】
+        1. 抽象的な要約ではなく、ドキュメントに書かれている「具体的な詳細、数値、手順」をそのまま引用して答えてください。
+        2. 「〇〇ページに書いてあります」のようなページ情報の回答は不要です。そのページに書かれている中身を答えてください。
+        3. ドキュメントに答えが書かれていない場合は、「提供された資料にはその情報が含まれていません」と正直に答えてください。嘘をつかないでください。
+        
+        参照ドキュメント:
+        {context}
+
+        質問: {question}
+
+        回答:
+        """
+        
+        PROMPT = PromptTemplate(
+            template=template, 
+            input_variables=["context", "question"]
+        )
+
         # QAチェーンの作成
+        # chain_type_kwargsを使ってプロンプトを渡す
         qa_chain = RetrievalQA.from_chain_type(
             llm=llm,
             chain_type="stuff",
             retriever=retriever,
-            return_source_documents=False
+            return_source_documents=False,
+            chain_type_kwargs={"prompt": PROMPT}
         )
-        print("🚀 RAGチェーンの準備が完了しました。")
+        print("🚀 RAGチェーン（高精度版）の準備が完了しました。")
         return qa_chain
 
     except Exception as e:
