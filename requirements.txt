@@ -7,3 +7,9 @@ faiss-cpu
 python-dotenv
 flask
 tqdm
+pypdf
+unstructured
+openpyxl
+docx2txt
+networkx
+msoffcrypto-tool

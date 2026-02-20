@@ -3,16 +3,15 @@ import discord
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_community.document_loaders import DirectoryLoader, TextLoader
-from langchain_text_splitters import CharacterTextSplitter
+# ★追加：PDFやExcelなどを読み込むためのLoader
+from langchain_community.document_loaders import PyPDFLoader, UnstructuredExcelLoader, CSVLoader, Docx2txtLoader
 from langchain_community.vectorstores import FAISS
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from keep_alive import keep_alive # サーバー常時稼働用
-import glob
 from langchain.docstore.document import Document
-import asyncio # ★追加：非同期処理用
+import asyncio
 
 # 環境変数の読み込み
 load_dotenv()
@@ -21,7 +20,7 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 TARGET_CHANNEL_NAME = "stagea03-質問部屋" # Botが反応するチャンネル名
-DATA_DIR = "data" # テキストファイルを置くフォルダ
+DATA_DIR = "data" # ファイルを置くフォルダ
 
 # Discordクライアントの設定
 intents = discord.Intents.default()
@@ -32,46 +31,79 @@ bot = discord.Client(intents=intents)
 qa_chain = None
 
 def create_rag_chain():
-    """RAGのチェーンを作成する関数（文字コード総当たり対応版）"""
+    """RAGのチェーンを作成する関数（全ファイル形式対応版）"""
     global qa_chain
     
     if not os.path.exists(DATA_DIR):
-        print(f"フォルダ {DATA_DIR} が見つかりません。作成します。", flush=True) # flush=Trueで即時表示
+        print(f"フォルダ {DATA_DIR} が見つかりません。作成します。", flush=True)
         os.makedirs(DATA_DIR)
         return None
 
     print("📂 ドキュメントを読み込んでいます...", flush=True)
     try:
         documents = []
-        file_paths = glob.glob(f"{DATA_DIR}/**/*.txt", recursive=True)
+        file_paths = []
+        
+        # ★変更点：os.walkを使ってフォルダ内のすべてのファイルを確実に探す
+        for root, dirs, files in os.walk(DATA_DIR):
+            for file in files:
+                # 読みたい拡張子を指定
+                if file.lower().endswith(('.txt', '.pdf', '.xlsx', '.csv', '.docx')):
+                    file_paths.append(os.path.join(root, file))
         
         if not file_paths:
-            print("⚠️ テキストファイルが見つかりませんでした。", flush=True)
+            print("⚠️ 読み込めるファイルが見つかりませんでした。", flush=True)
             return None
 
-        # 総当たりで文字コードを解読するループ
+        # 拡張子に合わせて適切な読み込み処理を行う
         for filepath in file_paths:
-            content = ""
-            for enc in ['utf-8', 'cp932', 'shift_jis', 'euc_jp', 'iso-2022-jp']:
-                try:
-                    with open(filepath, 'r', encoding=enc) as f:
-                        content = f.read()
-                    break 
-                except UnicodeDecodeError:
-                    continue
-            
-            if content:
-                documents.append(Document(page_content=content, metadata={"source": filepath}))
-            else:
-                print(f"⚠️ 読み込みスキップ（全ての文字コードで解読不可）: {filepath}", flush=True)
+            ext = os.path.splitext(filepath)[1].lower()
+            try:
+                if ext == '.txt':
+                    # txtは文字コード総当たりで読む
+                    content = ""
+                    for enc in ['utf-8', 'cp932', 'shift_jis', 'euc_jp', 'iso-2022-jp']:
+                        try:
+                            with open(filepath, 'r', encoding=enc) as f:
+                                content = f.read()
+                            break 
+                        except UnicodeDecodeError:
+                            continue
+                    if content:
+                        documents.append(Document(page_content=content, metadata={"source": filepath}))
+                    else:
+                        print(f"⚠️ スキップ（文字コード解読不可）: {filepath}", flush=True)
+                        
+                elif ext == '.pdf':
+                    loader = PyPDFLoader(filepath)
+                    documents.extend(loader.load())
+                    print(f"📄 PDFを読み込みました: {filepath}", flush=True)
+                    
+                elif ext == '.xlsx':
+                    loader = UnstructuredExcelLoader(filepath)
+                    documents.extend(loader.load())
+                    print(f"📊 Excelを読み込みました: {filepath}", flush=True)
+                    
+                elif ext == '.csv':
+                    loader = CSVLoader(filepath, encoding='utf-8')
+                    documents.extend(loader.load())
+                    print(f"📑 CSVを読み込みました: {filepath}", flush=True)
+                    
+                elif ext == '.docx':
+                    loader = Docx2txtLoader(filepath)
+                    documents.extend(loader.load())
+                    print(f"📝 Wordを読み込みました: {filepath}", flush=True)
+                    
+            except Exception as e:
+                print(f"⚠️ {filepath} の読み込みでエラーが発生しました: {e}", flush=True)
 
-        print(f"✅ {len(documents)} 件のファイルを読み込みました。ベクトル化を開始します...", flush=True)
+        print(f"✅ 合計 {len(documents)} チャンクのデータを読み込みました。ベクトル化を開始します...", flush=True)
 
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         texts = text_splitter.split_documents(documents)
 
         print("🧠 ベクトルデータベースを構築中...（APIと通信するため数十秒かかります）", flush=True)
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
         db = FAISS.from_documents(texts, embeddings)
         retriever = db.as_retriever(search_kwargs={"k": 6})
 
@@ -111,7 +143,7 @@ def create_rag_chain():
             return_source_documents=False,
             chain_type_kwargs={"prompt": PROMPT}
         )
-        print("🚀 RAGチェーン（高精度＆文字コード無敵版）の準備が完了しました。質問を受け付けます！", flush=True)
+        print("🚀 RAGチェーン（全ファイル対応版）の準備が完了しました。質問を受け付けます！", flush=True)
         return qa_chain
 
     except Exception as e:
@@ -122,8 +154,6 @@ def create_rag_chain():
 async def on_ready():
     print(f'🚀 準備完了！Botを起動します。', flush=True)
     print(f'ログインしました: {bot.user}', flush=True)
-    
-    # ★変更点：重い処理をバックグラウンドスレッドに逃がし、Discordのフリーズを防ぐ
     bot.loop.run_in_executor(None, create_rag_chain)
 
 @bot.event
@@ -158,9 +188,7 @@ async def on_message(message):
             else:
                 await message.channel.send(f"エラーが発生しました: {e}")
 
-# Webサーバーを裏で動かす（24時間稼働用）
 keep_alive()
 
-# Botの実行
 if DISCORD_TOKEN:
     bot.run(DISCORD_TOKEN)
