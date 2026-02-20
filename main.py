@@ -12,6 +12,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from keep_alive import keep_alive # サーバー常時稼働用
 import glob
 from langchain.docstore.document import Document
+import asyncio # ★追加：非同期処理用
 
 # 環境変数の読み込み
 load_dotenv()
@@ -35,18 +36,17 @@ def create_rag_chain():
     global qa_chain
     
     if not os.path.exists(DATA_DIR):
-        print(f"フォルダ {DATA_DIR} が見つかりません。作成します。")
+        print(f"フォルダ {DATA_DIR} が見つかりません。作成します。", flush=True) # flush=Trueで即時表示
         os.makedirs(DATA_DIR)
         return None
 
-    print("📂 ドキュメントを読み込んでいます...")
+    print("📂 ドキュメントを読み込んでいます...", flush=True)
     try:
         documents = []
-        # dataフォルダ内の全txtファイルを取得
         file_paths = glob.glob(f"{DATA_DIR}/**/*.txt", recursive=True)
         
         if not file_paths:
-            print("⚠️ テキストファイルが見つかりませんでした。")
+            print("⚠️ テキストファイルが見つかりませんでした。", flush=True)
             return None
 
         # 総当たりで文字コードを解読するループ
@@ -56,23 +56,21 @@ def create_rag_chain():
                 try:
                     with open(filepath, 'r', encoding=enc) as f:
                         content = f.read()
-                    break  # 読み込み成功したらループを抜ける
+                    break 
                 except UnicodeDecodeError:
-                    continue  # 失敗したら次の文字コードを試す
+                    continue
             
             if content:
-                # 成功した内容をリストに追加
                 documents.append(Document(page_content=content, metadata={"source": filepath}))
             else:
-                print(f"⚠️ 読み込みスキップ（全ての文字コードで解読不可）: {filepath}")
+                print(f"⚠️ 読み込みスキップ（全ての文字コードで解読不可）: {filepath}", flush=True)
 
-        print(f"✅ {len(documents)} 件のファイルを読み込みました。")
+        print(f"✅ {len(documents)} 件のファイルを読み込みました。ベクトル化を開始します...", flush=True)
 
-        # テキストを分割（再帰的分割）
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         texts = text_splitter.split_documents(documents)
 
-        print("🧠 ベクトルデータベースを構築中...")
+        print("🧠 ベクトルデータベースを構築中...（APIと通信するため数十秒かかります）", flush=True)
         embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
         db = FAISS.from_documents(texts, embeddings)
         retriever = db.as_retriever(search_kwargs={"k": 6})
@@ -113,60 +111,48 @@ def create_rag_chain():
             return_source_documents=False,
             chain_type_kwargs={"prompt": PROMPT}
         )
-        print("🚀 RAGチェーン（高精度＆文字コード無敵版）の準備が完了しました。")
+        print("🚀 RAGチェーン（高精度＆文字コード無敵版）の準備が完了しました。質問を受け付けます！", flush=True)
         return qa_chain
 
     except Exception as e:
-        print(f"❌ 初期化中にエラーが発生しました: {e}")
+        print(f"❌ 初期化中にエラーが発生しました: {e}", flush=True)
         return None
 
 @bot.event
 async def on_ready():
-    print(f'🚀 準備完了！Botを起動します。')
-    print(f'ログインしました: {bot.user}')
-    # 起動時にRAGチェーンを構築
-    create_rag_chain()
+    print(f'🚀 準備完了！Botを起動します。', flush=True)
+    print(f'ログインしました: {bot.user}', flush=True)
+    
+    # ★変更点：重い処理をバックグラウンドスレッドに逃がし、Discordのフリーズを防ぐ
+    bot.loop.run_in_executor(None, create_rag_chain)
 
 @bot.event
 async def on_message(message):
-    # 自分自身のメッセージには反応しない
     if message.author == bot.user:
         return
 
-    # 指定したチャンネル以外では反応しない
     if message.channel.name != TARGET_CHANNEL_NAME:
         return
 
-    # Botへのメンションが含まれていない場合は無視
     if bot.user not in message.mentions:
         return
 
-    # "考え中..." の表示
     async with message.channel.typing():
         try:
-            # RAGチェーンがない場合は再構築を試みる
             if qa_chain is None:
-                create_rag_chain()
-                if qa_chain is None:
-                    await message.channel.send("知識データの読み込みに失敗しているため、回答できません。")
-                    return
+                await message.channel.send("🔄 現在、知識データベースを構築中です。あと数十秒ほど待ってから再度話しかけてください！")
+                return
 
-            # メッセージからメンションを除去してクエリにする
             query = message.content.replace(f'<@&{bot.user.id}>', '').replace(f'<@{bot.user.id}>', '')
 
-            # Geminiに質問を投げる
-            # invokeを使うことで、ここでも自動リトライが効く
             response = await bot.loop.run_in_executor(None, qa_chain.invoke, query)
             answer = response['result']
             
             await message.channel.send(answer)
             
         except Exception as e:
-            # それでもエラーが出た場合はログに出す
             error_msg = str(e)
-            print(f"Error: {error_msg}")
-            
-            # 429エラー（制限）の場合はユーザーに分かりやすく伝える
+            print(f"Error: {error_msg}", flush=True)
             if "429" in error_msg:
                 await message.channel.send("申し訳ありません。Gemini 2.0の利用制限（アクセス集中）のため、少し時間を置いてからもう一度話しかけてください。")
             else:
