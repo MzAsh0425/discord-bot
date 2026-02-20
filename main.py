@@ -10,6 +10,8 @@ from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from keep_alive import keep_alive # サーバー常時稼働用
+import glob
+from langchain.docstore.document import Document
 
 # 環境変数の読み込み
 load_dotenv()
@@ -29,7 +31,7 @@ bot = discord.Client(intents=intents)
 qa_chain = None
 
 def create_rag_chain():
-    """RAGのチェーンを作成する関数（精度向上・Gemini 2.0対応版）"""
+    """RAGのチェーンを作成する関数（文字コード総当たり対応版）"""
     global qa_chain
     
     if not os.path.exists(DATA_DIR):
@@ -39,48 +41,49 @@ def create_rag_chain():
 
     print("📂 ドキュメントを読み込んでいます...")
     try:
-        # テキストファイルを読み込む
-        loader = DirectoryLoader(
-                    DATA_DIR, 
-                    glob="**/*.txt", 
-                    loader_cls=TextLoader, 
-                    loader_kwargs={"autodetect_encoding": True}, 
-                    show_progress=True
-                )
-        documents = loader.load()
+        documents = []
+        # dataフォルダ内の全txtファイルを取得
+        file_paths = glob.glob(f"{DATA_DIR}/**/*.txt", recursive=True)
         
-        if not documents:
+        if not file_paths:
             print("⚠️ テキストファイルが見つかりませんでした。")
             return None
 
+        # 総当たりで文字コードを解読するループ
+        for filepath in file_paths:
+            content = ""
+            for enc in ['utf-8', 'cp932', 'shift_jis', 'euc_jp', 'iso-2022-jp']:
+                try:
+                    with open(filepath, 'r', encoding=enc) as f:
+                        content = f.read()
+                    break  # 読み込み成功したらループを抜ける
+                except UnicodeDecodeError:
+                    continue  # 失敗したら次の文字コードを試す
+            
+            if content:
+                # 成功した内容をリストに追加
+                documents.append(Document(page_content=content, metadata={"source": filepath}))
+            else:
+                print(f"⚠️ 読み込みスキップ（全ての文字コードで解読不可）: {filepath}")
+
         print(f"✅ {len(documents)} 件のファイルを読み込みました。")
 
-        # 【改善1】テキスト分割を「Recursive（再帰的）」に変更
-        # 文章の意味の区切れ（改行や句読点）を優先して切るため、文脈が途切れにくい
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,  # 1塊のサイズ（少し小さくして具体性を高める）
-            chunk_overlap=200 # 前後の重複
-        )
+        # テキストを分割（再帰的分割）
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         texts = text_splitter.split_documents(documents)
 
         print("🧠 ベクトルデータベースを構築中...")
         embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
         db = FAISS.from_documents(texts, embeddings)
-        
-        # 【改善2】Retrieverの設定（検索件数を増やす）
-        # k=6: 関連する文章をトップ6件まで引っ張ってくる（デフォルトは4）
         retriever = db.as_retriever(search_kwargs={"k": 6})
 
-        # LLMの設定
         llm = ChatGoogleGenerativeAI(
             model="gemini-2.0-flash", 
-            temperature=0, # 0にすることで、創造性を排除し事実に忠実にさせる
+            temperature=0,
             max_retries=10,
             transport="rest" 
         )
 
-        # 【改善3】カスタムプロンプト（AIへの詳細な指示書）を作成
-        # ここで「具体的に答えろ」「ページ数は不要」と指示する
         template = """
         あなたは提供された資料に基づいて質問に答える専門のアシスタントです。
         以下の「参照ドキュメント」の内容のみを使用して、質問に答えてください。
@@ -103,8 +106,6 @@ def create_rag_chain():
             input_variables=["context", "question"]
         )
 
-        # QAチェーンの作成
-        # chain_type_kwargsを使ってプロンプトを渡す
         qa_chain = RetrievalQA.from_chain_type(
             llm=llm,
             chain_type="stuff",
@@ -112,7 +113,7 @@ def create_rag_chain():
             return_source_documents=False,
             chain_type_kwargs={"prompt": PROMPT}
         )
-        print("🚀 RAGチェーン（高精度版）の準備が完了しました。")
+        print("🚀 RAGチェーン（高精度＆文字コード無敵版）の準備が完了しました。")
         return qa_chain
 
     except Exception as e:
