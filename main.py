@@ -71,7 +71,7 @@ def create_rag_chain():
         texts = text_splitter.split_documents(documents)
 
         print("🧠 ベクトルデータベースを構築中...（APIと通信するため数十秒かかります）", flush=True)
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
         db = FAISS.from_documents(texts, embeddings)
         retriever = db.as_retriever(search_kwargs={"k": 6})
 
