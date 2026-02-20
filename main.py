@@ -40,7 +40,13 @@ def create_rag_chain():
     print("📂 ドキュメントを読み込んでいます...")
     try:
         # テキストファイルを読み込む
-        loader = DirectoryLoader(DATA_DIR, glob="**/*.txt", loader_cls=TextLoader, show_progress=True)
+        loader = DirectoryLoader(
+                    DATA_DIR, 
+                    glob="**/*.txt", 
+                    loader_cls=TextLoader, 
+                    loader_kwargs={"autodetect_encoding": True}, 
+                    show_progress=True
+                )
         documents = loader.load()
         
         if not documents:
